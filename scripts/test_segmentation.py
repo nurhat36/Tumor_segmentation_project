@@ -38,7 +38,7 @@ def process_and_save_mask(predicted_mask, original_image, folder="masks"):
         original_image_colored = original_image.copy()
 
     # Konturları çiz
-    cv2.drawContours(original_image_colored, contours, -1, (0, 255, 0), 5)
+    cv2.drawContours(original_image_colored, contours, -1, (0, 255, 0), 3)
 
     # Görselleştirme
     plt.figure(figsize=(15, 5))
