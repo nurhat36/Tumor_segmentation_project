@@ -1,18 +1,16 @@
 import os
 import cv2
 import numpy as np
-import matplotlib.pyplot as plt
 from datetime import datetime
 import tensorflow as tf
 from tensorflow.keras import layers, models, backend as K
-from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLROnPlateau
 from PIL import Image, ImageTk
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from skimage import exposure
 
 
-# 1. Özel metrik fonksiyonları global olarak tanımla
+# 1. Custom metric functions
 def dice_coef(y_true, y_pred, smooth=1):
     y_true_f = K.flatten(y_true)
     y_pred_f = K.flatten(y_pred)
@@ -24,7 +22,6 @@ def dice_loss(y_true, y_pred):
     return 1 - dice_coef(y_true, y_pred)
 
 
-# IoU metriği için yeni fonksiyon
 def iou_metric(y_true, y_pred):
     y_true_f = K.flatten(y_true)
     y_pred_f = K.flatten(y_pred)
@@ -33,9 +30,9 @@ def iou_metric(y_true, y_pred):
     return intersection / (union + K.epsilon())
 
 
-# 2. Gelişmiş U-Net Modeli
+# 2. Advanced U-Net Model
 class TumorSegmentationModel:
-    def __init__(self, input_shape=(128, 128, 1)):  # Giriş boyutunu 128x128x1 olarak ayarla
+    def __init__(self, input_shape=(128, 128, 1)):
         self.input_shape = input_shape
         self.model = self.build_advanced_unet()
 
@@ -91,69 +88,53 @@ class TumorSegmentationModel:
         outputs = layers.Conv2D(1, (1, 1), activation='sigmoid')(d4)
 
         model = models.Model(inputs=[inputs], outputs=[outputs])
-
         model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4),
                       loss=dice_loss,
-                      metrics=[dice_coef, 'accuracy', iou_metric])  # IoU metriği değiştirildi
-
+                      metrics=[dice_coef, 'accuracy', iou_metric])
         return model
 
 
-# 3. Görüntü İşleme Sınıfı (Aynı)
+# 3. Image Processor Class
 class ImageProcessor:
     @staticmethod
-    def load_image(image_path, target_size=(128, 128)):  # Boyutu 128x128 olarak değiştir
-        """Görüntüyü yükler ve ön işleme yapar"""
+    def load_image(image_path, target_size=(128, 128)):
         try:
             img = Image.open(image_path)
-
-            # Görüntüyü gri tonlamaya çevir
             if img.mode != 'L':
                 img = img.convert('L')
 
-            # Histogram eşitleme
             img_array = np.array(img)
             img_array = exposure.equalize_hist(img_array)
             img = Image.fromarray((img_array * 255).astype(np.uint8))
-
-            # Yeniden boyutlandır
             img = img.resize(target_size)
 
-            # Normalizasyon ve boyut ayarı
             img_array = np.array(img) / 255.0
-            return img_array.reshape(1, *target_size, 1)  # 1 kanal (grayscale) olarak döndür
+            return img_array.reshape(1, *target_size, 1)
         except Exception as e:
-            raise ValueError(f"Görüntü yükleme hatası: {str(e)}")
+            raise ValueError(f"Image loading error: {str(e)}")
 
     @staticmethod
     def post_process_mask(predicted_mask, original_size):
-        """Model çıktısını işleyerek binary maske oluşturur"""
-        # Model çıktısını orijinal boyuta dönüştür
         mask = cv2.resize(predicted_mask[0, :, :, 0], original_size)
-
-        # Eşikleme
         mask_uint8 = (mask * 255).astype(np.uint8)
         _, binary_mask = cv2.threshold(mask_uint8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-        # Gürültü temizleme
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         processed_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_CLOSE, kernel)
         processed_mask = cv2.morphologyEx(processed_mask, cv2.MORPH_OPEN, kernel)
 
-        # Küçük nesneleri kaldır
         contours, _ = cv2.findContours(processed_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         for cnt in contours:
             if cv2.contourArea(cnt) < 100:
                 cv2.drawContours(processed_mask, [cnt], -1, 0, -1)
-
         return processed_mask
 
 
-# 4. Ana GUI Uygulaması (Model yükleme kısmı değiştirildi)
+# 4. Main GUI Application
 class TumorSegmentationApp:
     def __init__(self, root, model_path):
         self.root = root
-        self.root.title("Gelişmiş Tümör Segmentasyon Sistemi")
+        self.root.title("Advanced Tumor Segmentation System")
         self.root.geometry("900x700")
         self.root.minsize(800, 600)
 
@@ -161,102 +142,145 @@ class TumorSegmentationApp:
         self.model = None
         self.load_model()
 
-        self.create_widgets()
+        # Image variables
         self.original_image = None
         self.processed_image = None
         self.mask = None
         self.image_path = None
+        self.tk_image = None
+
+        # ROI selection variables
+        self.rect_start_x = None
+        self.rect_start_y = None
+        self.rect_end_x = None
+        self.rect_end_y = None
+        self.rectangle_id = None
+        self.selecting_roi = False
+
+        self.create_widgets()
 
     def load_model(self):
-        """Modeli yükler veya yeni bir model oluşturur"""
         try:
             if os.path.exists(self.model_path):
-                # Özel metrik fonksiyonlarını tanımla
                 custom_objects = {
                     'dice_coef': dice_coef,
                     'dice_loss': dice_loss,
-                    'iou_metric': iou_metric  # IoU metriği değiştirildi
+                    'iou_metric': iou_metric
                 }
-
-                # Modeli yükle
                 self.model = tf.keras.models.load_model(
                     self.model_path,
                     custom_objects=custom_objects,
-                    compile=False  # Önce compile=False ile yükle
+                    compile=False
                 )
-
-                # Modeli tekrar compile et
                 self.model.compile(
                     optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4),
                     loss=dice_loss,
-                    metrics=[dice_coef, 'accuracy', iou_metric]  # IoU metriği değiştirildi
+                    metrics=[dice_coef, 'accuracy', iou_metric]
                 )
-
-                print("Model başarıyla yüklendi ve compile edildi.")
+                print("Model loaded and compiled successfully.")
             else:
-                messagebox.showwarning("Uyarı", "Model dosyası bulunamadı. Yeni bir model oluşturuluyor.")
+                messagebox.showwarning("Warning", "Model file not found. Creating new model.")
                 self.model = TumorSegmentationModel().model
-                # Yeni modeli kaydet
                 os.makedirs(os.path.dirname(self.model_path), exist_ok=True)
                 self.model.save(self.model_path)
-                print(f"Yeni model oluşturuldu ve kaydedildi: {self.model_path}")
+                print(f"New model created and saved: {self.model_path}")
         except Exception as e:
-            messagebox.showerror("Hata", f"Model yükleme hatası: {str(e)}")
-            print(f"Hata detayı: {str(e)}")
+            messagebox.showerror("Error", f"Model loading error: {str(e)}")
+            print(f"Error details: {str(e)}")
             self.root.destroy()
 
-    # Diğer metodlar aynı...
     def create_widgets(self):
-        """GUI arayüzünü oluşturur"""
-        # Ana çerçeve
         main_frame = ttk.Frame(self.root, padding="10")
         main_frame.pack(fill=tk.BOTH, expand=True)
 
-        # Kontrol paneli
-        control_frame = ttk.LabelFrame(main_frame, text="Kontrol Paneli", padding="10")
+        # Control panel
+        control_frame = ttk.LabelFrame(main_frame, text="Control Panel", padding="10")
         control_frame.pack(fill=tk.X, pady=5)
 
-        # Dosya seç butonu
-        self.btn_load = ttk.Button(control_frame, text="Görüntü Yükle", command=self.load_image)
+        self.btn_load = ttk.Button(control_frame, text="Load Image", command=self.load_image)
         self.btn_load.pack(side=tk.LEFT, padx=5)
 
-        # Segmentasyon butonu
-        self.btn_process = ttk.Button(control_frame, text="Segmentasyon Yap", state=tk.DISABLED,
+        self.btn_select_roi = ttk.Button(control_frame, text="Select ROI", state=tk.DISABLED,
+                                         command=self.enable_roi_selection)
+        self.btn_select_roi.pack(side=tk.LEFT, padx=5)
+
+        self.btn_process = ttk.Button(control_frame, text="Segment", state=tk.DISABLED,
                                       command=self.process_image)
         self.btn_process.pack(side=tk.LEFT, padx=5)
 
-        # Kaydet butonu
-        self.btn_save = ttk.Button(control_frame, text="Sonucu Kaydet", state=tk.DISABLED, command=self.save_results)
+        self.btn_save = ttk.Button(control_frame, text="Save Results", state=tk.DISABLED,
+                                   command=self.save_results)
         self.btn_save.pack(side=tk.LEFT, padx=5)
 
-        # Görüntü görüntüleme alanı
+        # Image display area
         image_frame = ttk.Frame(main_frame)
         image_frame.pack(fill=tk.BOTH, expand=True)
 
-        # Orijinal görüntü
-        self.original_label = ttk.Label(image_frame, text="Orijinal Görüntü")
+        # Original image panel
+        self.original_label = ttk.Label(image_frame, text="Original Image")
         self.original_label.pack()
-        self.original_panel = ttk.Label(image_frame)
-        self.original_panel.pack(side=tk.LEFT, padx=10, pady=10, fill=tk.BOTH, expand=True)
 
-        # Segmentasyon sonucu
-        self.result_label = ttk.Label(image_frame, text="Segmentasyon Sonucu")
+        self.original_canvas = tk.Canvas(image_frame, bg='white')
+        self.original_canvas.pack(side=tk.LEFT, padx=10, pady=10, fill=tk.BOTH, expand=True)
+        self.original_canvas.bind("<ButtonPress-1>", self.start_roi_selection)
+        self.original_canvas.bind("<B1-Motion>", self.update_roi_selection)
+        self.original_canvas.bind("<ButtonRelease-1>", self.end_roi_selection)
+
+        # Result panel
+        self.result_label = ttk.Label(image_frame, text="Segmentation Result")
         self.result_label.pack()
-        self.result_panel = ttk.Label(image_frame)
-        self.result_panel.pack(side=tk.RIGHT, padx=10, pady=10, fill=tk.BOTH, expand=True)
 
-        # Bilgi paneli
+        self.result_canvas = tk.Canvas(image_frame, bg='white')
+        self.result_canvas.pack(side=tk.RIGHT, padx=10, pady=10, fill=tk.BOTH, expand=True)
+
+        # Info panel
         self.info_text = tk.Text(main_frame, height=5, state=tk.DISABLED)
         self.info_text.pack(fill=tk.X, pady=5)
 
-        # İlerleme çubuğu
+        # Progress bar
         self.progress = ttk.Progressbar(main_frame, mode='determinate')
         self.progress.pack(fill=tk.X, pady=5)
 
+    def enable_roi_selection(self):
+        if not self.original_image:
+            messagebox.showwarning("Warning", "Please load an image first")
+            return
+
+        self.selecting_roi = True
+        self.btn_select_roi.config(state=tk.DISABLED)
+        self.btn_process.config(state=tk.DISABLED)
+        messagebox.showinfo("Info", "Please draw a rectangle on the image to select ROI")
+
+    def start_roi_selection(self, event):
+        if self.selecting_roi:
+            self.rect_start_x = event.x
+            self.rect_start_y = event.y
+            self.rect_end_x = event.x
+            self.rect_end_y = event.y
+            self.rectangle_id = self.original_canvas.create_rectangle(
+                self.rect_start_x, self.rect_start_y,
+                self.rect_end_x, self.rect_end_y,
+                outline='red', width=2
+            )
+
+    def update_roi_selection(self, event):
+        if self.selecting_roi and self.rectangle_id:
+            self.rect_end_x = event.x
+            self.rect_end_y = event.y
+            self.original_canvas.coords(
+                self.rectangle_id,
+                self.rect_start_x, self.rect_start_y,
+                self.rect_end_x, self.rect_end_y
+            )
+
+    def end_roi_selection(self, event):
+        if self.selecting_roi:
+            self.selecting_roi = False
+            self.btn_process.config(state=tk.NORMAL)
+
     def load_image(self):
-        """Görüntü yüklemek için dosya iletişim kutusunu açar"""
         file_path = filedialog.askopenfilename(
-            title="Tıbbi Görüntü Seçin",
+            title="Select Medical Image",
             filetypes=[("Image files", "*.jpg *.jpeg *.png *.bmp *.dcm"), ("All files", "*.*")]
         )
 
@@ -267,87 +291,153 @@ class TumorSegmentationApp:
             self.image_path = file_path
             self.original_image = Image.open(file_path)
 
-            # Görüntüyü göster
-            self.display_image(self.original_image, self.original_panel)
+            # Clear previous ROI selection
+            self.rect_start_x = None
+            self.rect_start_y = None
+            self.rect_end_x = None
+            self.rect_end_y = None
+            self.original_canvas.delete("all")
 
-            # Bilgi güncelle
-            self.update_info(f"Yüklenen görüntü: {os.path.basename(file_path)}\n"
-                             f"Boyut: {self.original_image.size}")
+            # Display image
+            self.tk_image = ImageTk.PhotoImage(self.original_image)
+            self.original_canvas.create_image(0, 0, anchor=tk.NW, image=self.tk_image)
 
-            # Buton durumlarını güncelle
-            self.btn_process.config(state=tk.NORMAL)
+            # Update info
+            self.update_info(f"Loaded image: {os.path.basename(file_path)}\n"
+                             f"Size: {self.original_image.size}")
+
+            # Update button states
+            self.btn_select_roi.config(state=tk.NORMAL)
+            self.btn_process.config(state=tk.DISABLED)
             self.btn_save.config(state=tk.DISABLED)
 
         except Exception as e:
-            messagebox.showerror("Hata", f"Görüntü yükleme hatası: {str(e)}")
+            messagebox.showerror("Error", f"Image loading error: {str(e)}")
 
     def process_image(self):
-        """Görüntüyü işler ve segmentasyon yapar"""
         if not self.image_path or not self.original_image:
+            return
+
+        if not all([self.rect_start_x, self.rect_start_y, self.rect_end_x, self.rect_end_y]):
+            messagebox.showwarning("Warning", "Please select an ROI first")
             return
 
         try:
             self.progress.start()
 
-            # Orijinal boyutu sakla (sonradan post-processing için gerekli)
-            original_size = self.original_image.size
+            # Get image dimensions
+            img_width, img_height = self.original_image.size
+            original_img = np.array(self.original_image.convert('RGB'))
 
-            # Görüntüyü model için hazırla (128x128 grayscale)
-            img_array = ImageProcessor.load_image(self.image_path)
+            # Get ROI coordinates (ensure they're within image bounds)
+            x1 = max(0, min(self.rect_start_x, self.rect_end_x, img_width - 1))
+            y1 = max(0, min(self.rect_start_y, self.rect_end_y, img_height - 1))
+            x2 = min(img_width - 1, max(self.rect_start_x, self.rect_end_x, 0))
+            y2 = min(img_height - 1, max(self.rect_start_y, self.rect_end_y, 0))
 
-            # Segmentasyon yap
+            # Extract ROI
+            roi = original_img[y1:y2, x1:x2]
+            if roi.size == 0:
+                raise ValueError("Selected ROI is too small or invalid")
+
+            # Save ROI to temp file and process
+            temp_path = "temp_roi.png"
+            Image.fromarray(roi).save(temp_path)
+            img_array = ImageProcessor.load_image(temp_path)
+
+            # Predict
             prediction = self.model.predict(img_array)
 
-            # Post-processing (orijinal boyuta dönüştür)
-            self.mask = ImageProcessor.post_process_mask(prediction, original_size)
+            # Process mask
+            roi_height, roi_width = roi.shape[:2]
+            mask = ImageProcessor.post_process_mask(prediction, (roi_width, roi_height))
 
-            # Sonucu görselleştir
+            # Create full-size mask
+            full_mask = np.zeros((img_height, img_width), dtype=np.uint8)
+            full_mask[y1:y2, x1:x2] = mask
+            self.mask = full_mask
+
+            # Visualize results
             self.visualize_results()
 
-            # Bilgi güncelle
-            tumor_area = np.sum(self.mask > 0) / (original_size[0] * original_size[1]) * 100
-            self.update_info(f"Segmentasyon tamamlandı\n"
-                             f"Tümör alanı: {tumor_area:.2f}%")
+            # Update info
+            tumor_area = np.sum(self.mask > 0) / (img_width * img_height) * 100
+            self.update_info(f"Segmentation complete\n"
+                             f"Tumor area: {tumor_area:.2f}%\n"
+                             f"ROI Coordinates: ({x1},{y1})-({x2},{y2})")
 
-            # Buton durumlarını güncelle
+            # Update buttons
             self.btn_save.config(state=tk.NORMAL)
+            self.btn_select_roi.config(state=tk.NORMAL)
 
         except Exception as e:
-            messagebox.showerror("Hata", f"Segmentasyon hatası: {str(e)}")
+            messagebox.showerror("Error", f"Segmentation error: {str(e)}")
         finally:
             self.progress.stop()
+            if os.path.exists("temp_roi.png"):
+                os.remove("temp_roi.png")
 
     def visualize_results(self):
-        """Segmentasyon sonuçlarını görselleştirir"""
         original_img = np.array(self.original_image.convert('RGB'))
-        mask_resized = cv2.resize(self.mask, (original_img.shape[1], original_img.shape[0]))
 
-        # Maskeyi renklendir
-        colored_mask = cv2.applyColorMap(mask_resized, cv2.COLORMAP_JET)
+        # Colorize mask
+        colored_mask = cv2.applyColorMap(self.mask, cv2.COLORMAP_JET)
 
-        # Orijinal görüntü ile maskeyi birleştir
-        overlay = cv2.addWeighted(original_img, 0.7, colored_mask, 0.3, 0)
+        # Create overlay (only where mask exists)
+        overlay = original_img.copy()
+        overlay[self.mask > 0] = overlay[self.mask > 0] * 0.7 + colored_mask[self.mask > 0] * 0.3
 
-        # Konturları çiz
-        contours, _ = cv2.findContours(mask_resized, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        cv2.drawContours(overlay, contours, -1, (0, 255, 0), 2)
+        # Draw ROI rectangle
+        x1 = min(self.rect_start_x, self.rect_end_x)
+        y1 = min(self.rect_start_y, self.rect_end_y)
+        x2 = max(self.rect_start_x, self.rect_end_x)
+        y2 = max(self.rect_start_y, self.rect_end_y)
+        cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
-        # Sonuçları göster
+        # Draw contours (only in ROI)
+        roi_mask = self.mask[y1:y2, x1:x2]
+        contours, _ = cv2.findContours(roi_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for cnt in contours:
+            cnt[:, :, 0] += x1  # Adjust x coordinates
+            cnt[:, :, 1] += y1  # Adjust y coordinates
+            cv2.drawContours(overlay, [cnt], -1, (0, 255, 0), 2)
+
+        # Display result
         self.processed_image = Image.fromarray(overlay)
-        self.display_image(self.processed_image, self.result_panel)
+        self.display_result_image()
+
+    def display_result_image(self):
+        self.result_canvas.delete("all")
+        img_width, img_height = self.processed_image.size
+
+        # Calculate display size
+        canvas_width = self.result_canvas.winfo_width()
+        canvas_height = self.result_canvas.winfo_height()
+
+        ratio = min(canvas_width / img_width, canvas_height / img_height)
+        new_width = int(img_width * ratio)
+        new_height = int(img_height * ratio)
+
+        resized_img = self.processed_image.resize((new_width, new_height), Image.LANCZOS)
+        self.tk_processed_image = ImageTk.PhotoImage(resized_img)
+
+        # Center the image
+        x_pos = (canvas_width - new_width) // 2
+        y_pos = (canvas_height - new_height) // 2
+
+        self.result_canvas.create_image(x_pos, y_pos, anchor=tk.NW, image=self.tk_processed_image)
 
     def save_results(self):
-        """Sonuçları kaydeder"""
         if not self.processed_image or not self.image_path:
             return
 
-        save_dir = "segmentasyon_sonuclari"
+        save_dir = "segmentation_results"
         os.makedirs(save_dir, exist_ok=True)
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         base_name = os.path.splitext(os.path.basename(self.image_path))[0]
 
-        # Orijinal + segmentasyon birleşik görüntü
+        # Save combined image
         combined = Image.new('RGB', (self.original_image.width * 2, self.original_image.height))
         combined.paste(self.original_image, (0, 0))
         combined.paste(self.processed_image, (self.original_image.width, 0))
@@ -355,78 +445,34 @@ class TumorSegmentationApp:
         save_path = os.path.join(save_dir, f"{base_name}_{timestamp}.png")
         combined.save(save_path)
 
-        # Maskeyi ayrı olarak kaydet
+        # Save mask separately
         mask_path = os.path.join(save_dir, f"{base_name}_{timestamp}_mask.png")
         Image.fromarray(self.mask).save(mask_path)
 
-        messagebox.showinfo("Başarılı", f"Sonuçlar başarıyla kaydedildi:\n{save_path}")
-
-    def display_image(self, image, panel):
-        """Görüntüyü GUI'de gösterir"""
-        # Görüntüyü panel boyutuna uygun şekilde yeniden boyutlandır
-        width, height = self.get_display_size(image)
-        img_resized = image.resize((width, height), Image.LANCZOS)
-
-        # Tkinter için uygun formata dönüştür
-        img_tk = ImageTk.PhotoImage(img_resized)
-
-        # Paneli güncelle
-        panel.config(image=img_tk)
-        panel.image = img_tk  # Referansı koru
-
-    def get_display_size(self, image):
-        """Panel boyutuna göre görüntü boyutunu hesaplar"""
-        panel_width = self.original_panel.winfo_width() or 400
-        panel_height = self.original_panel.winfo_height() or 300
-
-        img_ratio = image.width / image.height
-        panel_ratio = panel_width / panel_height
-
-        if img_ratio > panel_ratio:
-            width = panel_width
-            height = int(panel_width / img_ratio)
-        else:
-            height = panel_height
-            width = int(panel_height * img_ratio)
-
-        return max(width, 100), max(height, 100)  # Minimum boyut
+        messagebox.showinfo("Success", f"Results saved successfully:\n{save_path}")
 
     def update_info(self, text):
-        """Bilgi panelini günceller"""
         self.info_text.config(state=tk.NORMAL)
         self.info_text.delete(1.0, tk.END)
         self.info_text.insert(tk.END, text)
         self.info_text.config(state=tk.DISABLED)
 
 
-# Uygulamayı başlat
-# Uygulamayı başlat
 if __name__ == "__main__":
     root = tk.Tk()
 
-    # Model yolu - mutlak yol kullanmaya çalışın
-    model_path = os.path.abspath("../models/unet_model.h5")
-    print(f"Model yolu: {model_path}")
+    # Model path - adjust as needed
+    model_path = os.path.abspath("unet_model.h5")
+    print(f"Model path: {model_path}")
 
-    # Model dosyasının varlığını kontrol et
+    # Check if model exists
     if not os.path.exists(model_path):
-        print(f"Uyarı: Model dosyası bulunamadı: {model_path}")
+        print(f"Warning: Model file not found at {model_path}")
+        # Create and save new model if needed
+        new_model = TumorSegmentationModel().model
+        os.makedirs(os.path.dirname(model_path), exist_ok=True)
+        new_model.save(model_path)
+        print(f"New model created and saved: {model_path}")
 
-    # Uygulamayı başlat
     app = TumorSegmentationApp(root, model_path=model_path)
-
-    # Pencere boyutlandırma olaylarını dinle
-    def on_resize(event):
-        if hasattr(app, 'original_image') and app.original_image is not None:
-            app.display_image(app.original_image, app.original_panel)
-        if hasattr(app, 'processed_image') and app.processed_image is not None:
-            app.display_image(app.processed_image, app.result_panel)
-
-    root.bind("<Configure>", on_resize)
-
-    root.mainloop()
-
-
-    root.bind("<Configure>", on_resize)
-
     root.mainloop()
