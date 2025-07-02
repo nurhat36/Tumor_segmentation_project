@@ -135,8 +135,8 @@ class TumorSegmentationApp:
     def __init__(self, root, model_path):
         self.root = root
         self.root.title("Advanced Tumor Segmentation System")
-        self.root.geometry("900x700")
-        self.root.minsize(800, 600)
+        self.root.geometry("1100x800")
+        self.root.minsize(1000, 700)
 
         self.model_path = model_path
         self.model = None
@@ -146,8 +146,10 @@ class TumorSegmentationApp:
         self.original_image = None
         self.processed_image = None
         self.mask = None
+        self.backup_mask = None
         self.image_path = None
         self.tk_image = None
+        self.tk_processed_image = None
 
         # ROI selection variables
         self.rect_start_x = None
@@ -157,7 +159,132 @@ class TumorSegmentationApp:
         self.rectangle_id = None
         self.selecting_roi = False
 
+        # Zoom and pan variables
+        self.zoom_level = 1.0
+        self.zoom_factor = 1.2
+        self.pan_offset_x = 0
+        self.pan_offset_y = 0
+
+        # Control points variables
+        self.dragging_point = None
+        self.points = []
+        self.point_radius = 8
+        self.point_ids = []
+        self.contour_points = []
+        self.edit_mode = False
+
         self.create_widgets()
+
+    def create_widgets(self):
+        main_frame = ttk.Frame(self.root, padding="10")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Control panel
+        control_frame = ttk.LabelFrame(main_frame, text="Control Panel", padding="10")
+        control_frame.pack(fill=tk.X, pady=5)
+
+        self.btn_load = ttk.Button(control_frame, text="Load Image", command=self.load_image)
+        self.btn_load.pack(side=tk.LEFT, padx=5)
+
+        self.btn_select_roi = ttk.Button(control_frame, text="Select ROI", state=tk.DISABLED,
+                                         command=self.enable_roi_selection)
+        self.btn_select_roi.pack(side=tk.LEFT, padx=5)
+
+        self.btn_process = ttk.Button(control_frame, text="Segment", state=tk.DISABLED,
+                                      command=self.process_image)
+        self.btn_process.pack(side=tk.LEFT, padx=5)
+
+        self.btn_edit = ttk.Button(control_frame, text="Edit", state=tk.DISABLED,
+                                   command=self.start_editing)
+        self.btn_edit.pack(side=tk.LEFT, padx=5)
+
+        self.btn_save_edit = ttk.Button(control_frame, text="Save Edit", state=tk.DISABLED,
+                                        command=self.save_edit)
+        self.btn_save_edit.pack(side=tk.LEFT, padx=5)
+
+        self.btn_cancel_edit = ttk.Button(control_frame, text="Cancel Edit", state=tk.DISABLED,
+                                          command=self.cancel_edit)
+        self.btn_cancel_edit.pack(side=tk.LEFT, padx=5)
+
+        self.btn_save = ttk.Button(control_frame, text="Save Results", state=tk.DISABLED,
+                                   command=self.save_results)
+        self.btn_save.pack(side=tk.LEFT, padx=5)
+
+        # Image display area
+        image_frame = ttk.Frame(main_frame)
+        image_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Original image panel
+        self.original_label = ttk.Label(image_frame, text="Original Image")
+        self.original_label.pack()
+
+        self.original_canvas = tk.Canvas(image_frame, bg='white', width=450, height=450)
+        self.original_canvas.pack(side=tk.LEFT, padx=10, pady=10, fill=tk.BOTH, expand=True)
+        self.original_canvas.bind("<ButtonPress-1>", self.start_roi_selection)
+        self.original_canvas.bind("<B1-Motion>", self.update_roi_selection)
+        self.original_canvas.bind("<ButtonRelease-1>", self.end_roi_selection)
+
+        # Result panel with scrollbars
+        result_frame = ttk.Frame(image_frame)
+        result_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+
+        self.result_label = ttk.Label(result_frame, text="Segmentation Result")
+        self.result_label.pack()
+
+        # Create canvas with scrollbars
+        canvas_container = ttk.Frame(result_frame)
+        canvas_container.pack(fill=tk.BOTH, expand=True)
+
+        # Vertical scrollbar
+        self.v_scroll = ttk.Scrollbar(canvas_container, orient=tk.VERTICAL)
+        self.v_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Horizontal scrollbar
+        self.h_scroll = ttk.Scrollbar(canvas_container, orient=tk.HORIZONTAL)
+        self.h_scroll.pack(side=tk.BOTTOM, fill=tk.X)
+
+        # Result canvas
+        self.result_canvas = tk.Canvas(
+            canvas_container,
+            bg='white',
+            width=450,
+            height=450,
+            yscrollcommand=self.v_scroll.set,
+            xscrollcommand=self.h_scroll.set
+        )
+        self.result_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # Configure scrollbars
+        self.v_scroll.config(command=self.result_canvas.yview)
+        self.h_scroll.config(command=self.result_canvas.xview)
+
+        # Bind mouse wheel for zooming
+        self.result_canvas.bind("<MouseWheel>", self.on_mousewheel)
+
+        # Bind control point events
+        self.result_canvas.bind("<ButtonPress-1>", self.on_point_press)
+        self.result_canvas.bind("<B1-Motion>", self.on_point_drag)
+        self.result_canvas.bind("<ButtonRelease-1>", self.on_point_release)
+
+        # Info panel
+        self.info_text = tk.Text(main_frame, height=5, state=tk.DISABLED)
+        self.info_text.pack(fill=tk.X, pady=5)
+
+        # Zoom control
+        zoom_frame = ttk.Frame(main_frame)
+        zoom_frame.pack(fill=tk.X, pady=5)
+
+        ttk.Label(zoom_frame, text="Zoom:").pack(side=tk.LEFT)
+        self.zoom_slider = ttk.Scale(zoom_frame, from_=0.1, to=5.0, value=1.0,
+                                     command=self.update_zoom_from_slider)
+        self.zoom_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+        self.zoom_label = ttk.Label(zoom_frame, text="1.0x")
+        self.zoom_label.pack(side=tk.LEFT)
+
+        # Progress bar
+        self.progress = ttk.Progressbar(main_frame, mode='determinate')
+        self.progress.pack(fill=tk.X, pady=5)
 
     def load_model(self):
         try:
@@ -189,57 +316,81 @@ class TumorSegmentationApp:
             print(f"Error details: {str(e)}")
             self.root.destroy()
 
-    def create_widgets(self):
-        main_frame = ttk.Frame(self.root, padding="10")
-        main_frame.pack(fill=tk.BOTH, expand=True)
+    def start_editing(self):
+        if self.mask is None:
+            messagebox.showwarning("Warning", "Please perform segmentation first")
+            return
 
-        # Control panel
-        control_frame = ttk.LabelFrame(main_frame, text="Control Panel", padding="10")
-        control_frame.pack(fill=tk.X, pady=5)
+        self.edit_mode = True
+        self.backup_mask = self.mask.copy()
+        self.btn_edit.config(state=tk.DISABLED)
+        self.btn_save_edit.config(state=tk.NORMAL)
+        self.btn_cancel_edit.config(state=tk.NORMAL)
+        self.update_info("Editing mode: Drag points to adjust the segmentation")
+        self.visualize_results()
 
-        self.btn_load = ttk.Button(control_frame, text="Load Image", command=self.load_image)
-        self.btn_load.pack(side=tk.LEFT, padx=5)
+    def save_edit(self):
+        self.edit_mode = False
+        self.btn_edit.config(state=tk.NORMAL)
+        self.btn_save_edit.config(state=tk.DISABLED)
+        self.btn_cancel_edit.config(state=tk.DISABLED)
+        self.backup_mask = None
+        self.update_info("Edits saved successfully")
 
-        self.btn_select_roi = ttk.Button(control_frame, text="Select ROI", state=tk.DISABLED,
-                                         command=self.enable_roi_selection)
-        self.btn_select_roi.pack(side=tk.LEFT, padx=5)
+    def cancel_edit(self):
+        if self.backup_mask is not None:
+            self.edit_mode = False
+            self.mask = self.backup_mask
+            self.btn_edit.config(state=tk.NORMAL)
+            self.btn_save_edit.config(state=tk.DISABLED)
+            self.btn_cancel_edit.config(state=tk.DISABLED)
+            self.update_info("Edits canceled")
+            self.visualize_results()
 
-        self.btn_process = ttk.Button(control_frame, text="Segment", state=tk.DISABLED,
-                                      command=self.process_image)
-        self.btn_process.pack(side=tk.LEFT, padx=5)
+    def on_point_press(self, event):
+        if not self.edit_mode or not self.points:
+            return
 
-        self.btn_save = ttk.Button(control_frame, text="Save Results", state=tk.DISABLED,
-                                   command=self.save_results)
-        self.btn_save.pack(side=tk.LEFT, padx=5)
+        x = self.result_canvas.canvasx(event.x)
+        y = self.result_canvas.canvasy(event.y)
 
-        # Image display area
-        image_frame = ttk.Frame(main_frame)
-        image_frame.pack(fill=tk.BOTH, expand=True)
+        for i, point in enumerate(self.points):
+            px = point[0] * self.zoom_level
+            py = point[1] * self.zoom_level
+            distance = ((px - x) ** 2 + (py - y) ** 2) ** 0.5
 
-        # Original image panel
-        self.original_label = ttk.Label(image_frame, text="Original Image")
-        self.original_label.pack()
+            if distance <= self.point_radius:
+                self.dragging_point = i
+                break
 
-        self.original_canvas = tk.Canvas(image_frame, bg='white')
-        self.original_canvas.pack(side=tk.LEFT, padx=10, pady=10, fill=tk.BOTH, expand=True)
-        self.original_canvas.bind("<ButtonPress-1>", self.start_roi_selection)
-        self.original_canvas.bind("<B1-Motion>", self.update_roi_selection)
-        self.original_canvas.bind("<ButtonRelease-1>", self.end_roi_selection)
+    def on_point_drag(self, event):
+        if not self.edit_mode or self.dragging_point is None:
+            return
 
-        # Result panel
-        self.result_label = ttk.Label(image_frame, text="Segmentation Result")
-        self.result_label.pack()
+        new_x = self.result_canvas.canvasx(event.x) / self.zoom_level
+        new_y = self.result_canvas.canvasy(event.y) / self.zoom_level
 
-        self.result_canvas = tk.Canvas(image_frame, bg='white')
-        self.result_canvas.pack(side=tk.RIGHT, padx=10, pady=10, fill=tk.BOTH, expand=True)
+        self.points[self.dragging_point] = (new_x, new_y)
 
-        # Info panel
-        self.info_text = tk.Text(main_frame, height=5, state=tk.DISABLED)
-        self.info_text.pack(fill=tk.X, pady=5)
+        temp_mask = np.zeros_like(self.mask)
+        contour = np.array(self.points, dtype=np.int32).reshape((-1, 1, 2))
 
-        # Progress bar
-        self.progress = ttk.Progressbar(main_frame, mode='determinate')
-        self.progress.pack(fill=tk.X, pady=5)
+        cv2.drawContours(temp_mask, [contour], -1, 255, -1)
+
+        x, y, w, h = cv2.boundingRect(contour)
+        expanded_rect = (
+            max(0, x - 10), max(0, y - 10),
+            min(self.mask.shape[1], x + w + 10),
+            min(self.mask.shape[0], y + h + 10)
+        )
+
+        self.mask[expanded_rect[1]:expanded_rect[3], expanded_rect[0]:expanded_rect[2]] = \
+            temp_mask[expanded_rect[1]:expanded_rect[3], expanded_rect[0]:expanded_rect[2]]
+
+        self.visualize_results()
+
+    def on_point_release(self, event):
+        self.dragging_point = None
 
     def enable_roi_selection(self):
         if not self.original_image:
@@ -298,6 +449,13 @@ class TumorSegmentationApp:
             self.rect_end_y = None
             self.original_canvas.delete("all")
 
+            # Reset zoom and pan
+            self.zoom_level = 1.0
+            self.zoom_slider.set(1.0)
+            self.zoom_label.config(text="1.0x")
+            self.pan_offset_x = 0
+            self.pan_offset_y = 0
+
             # Display image
             self.tk_image = ImageTk.PhotoImage(self.original_image)
             self.original_canvas.create_image(0, 0, anchor=tk.NW, image=self.tk_image)
@@ -310,6 +468,9 @@ class TumorSegmentationApp:
             self.btn_select_roi.config(state=tk.NORMAL)
             self.btn_process.config(state=tk.DISABLED)
             self.btn_save.config(state=tk.DISABLED)
+            self.btn_edit.config(state=tk.DISABLED)
+            self.btn_save_edit.config(state=tk.DISABLED)
+            self.btn_cancel_edit.config(state=tk.DISABLED)
 
         except Exception as e:
             messagebox.showerror("Error", f"Image loading error: {str(e)}")
@@ -369,6 +530,7 @@ class TumorSegmentationApp:
             # Update buttons
             self.btn_save.config(state=tk.NORMAL)
             self.btn_select_roi.config(state=tk.NORMAL)
+            self.btn_edit.config(state=tk.NORMAL)
 
         except Exception as e:
             messagebox.showerror("Error", f"Segmentation error: {str(e)}")
@@ -378,29 +540,37 @@ class TumorSegmentationApp:
                 os.remove("temp_roi.png")
 
     def visualize_results(self):
-        original_img = np.array(self.original_image.convert('RGB'))
+        if self.original_image is None or self.mask is None:
+            return
 
-        # Colorize mask
+        original_img = np.array(self.original_image.convert('RGB'))
         colored_mask = cv2.applyColorMap(self.mask, cv2.COLORMAP_JET)
 
-        # Create overlay (only where mask exists)
+        # Create overlay
         overlay = original_img.copy()
         overlay[self.mask > 0] = overlay[self.mask > 0] * 0.7 + colored_mask[self.mask > 0] * 0.3
 
         # Draw ROI rectangle
-        x1 = min(self.rect_start_x, self.rect_end_x)
-        y1 = min(self.rect_start_y, self.rect_end_y)
-        x2 = max(self.rect_start_x, self.rect_end_x)
-        y2 = max(self.rect_start_y, self.rect_end_y)
-        cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        if all([self.rect_start_x, self.rect_start_y, self.rect_end_x, self.rect_end_y]):
+            x1 = min(self.rect_start_x, self.rect_end_x)
+            y1 = min(self.rect_start_y, self.rect_end_y)
+            x2 = max(self.rect_start_x, self.rect_end_x)
+            y2 = max(self.rect_start_y, self.rect_end_y)
+            cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
-        # Draw contours (only in ROI)
-        roi_mask = self.mask[y1:y2, x1:x2]
-        contours, _ = cv2.findContours(roi_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # Find contours and create control points
+        contours, _ = cv2.findContours(self.mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(overlay, contours, -1, (0, 255, 0), 2)
+
+        # Update control points with simplified contour
+        self.points = []
         for cnt in contours:
-            cnt[:, :, 0] += x1  # Adjust x coordinates
-            cnt[:, :, 1] += y1  # Adjust y coordinates
-            cv2.drawContours(overlay, [cnt], -1, (0, 255, 0), 2)
+            # Simplify contour to reduce number of points
+            epsilon = 0.01 * cv2.arcLength(cnt, True)
+            approx = cv2.approxPolyDP(cnt, epsilon, True)
+
+            for point in approx:
+                self.points.append((point[0][0], point[0][1]))
 
         # Display result
         self.processed_image = Image.fromarray(overlay)
@@ -408,24 +578,63 @@ class TumorSegmentationApp:
 
     def display_result_image(self):
         self.result_canvas.delete("all")
+        if not self.processed_image:
+            return
+
         img_width, img_height = self.processed_image.size
+        zoomed_width = int(img_width * self.zoom_level)
+        zoomed_height = int(img_height * self.zoom_level)
 
-        # Calculate display size
-        canvas_width = self.result_canvas.winfo_width()
-        canvas_height = self.result_canvas.winfo_height()
-
-        ratio = min(canvas_width / img_width, canvas_height / img_height)
-        new_width = int(img_width * ratio)
-        new_height = int(img_height * ratio)
-
-        resized_img = self.processed_image.resize((new_width, new_height), Image.LANCZOS)
+        # Resize image
+        resized_img = self.processed_image.resize((zoomed_width, zoomed_height), Image.LANCZOS)
         self.tk_processed_image = ImageTk.PhotoImage(resized_img)
 
-        # Center the image
-        x_pos = (canvas_width - new_width) // 2
-        y_pos = (canvas_height - new_height) // 2
+        # Update scroll region
+        self.result_canvas.config(scrollregion=(0, 0, zoomed_width, zoomed_height))
 
-        self.result_canvas.create_image(x_pos, y_pos, anchor=tk.NW, image=self.tk_processed_image)
+        # Add image to canvas
+        self.result_canvas.create_image(0, 0, anchor=tk.NW, image=self.tk_processed_image)
+
+        # Draw control points if in edit mode
+        if self.edit_mode:
+            self.draw_control_points()
+
+    def draw_control_points(self):
+        self.point_ids = []
+        for point in self.points:
+            x = point[0] * self.zoom_level
+            y = point[1] * self.zoom_level
+
+            point_id = self.result_canvas.create_oval(
+                x - self.point_radius, y - self.point_radius,
+                x + self.point_radius, y + self.point_radius,
+                fill="red", outline="white", width=2
+            )
+            self.point_ids.append(point_id)
+
+    def update_zoom_from_slider(self, value):
+        try:
+            self.zoom_level = float(value)
+            self.zoom_label.config(text=f"{self.zoom_level:.1f}x")
+            self.display_result_image()
+        except ValueError:
+            pass
+
+    def on_mousewheel(self, event):
+        # Determine zoom direction
+        if event.delta > 0:
+            self.zoom_level *= self.zoom_factor
+        else:
+            self.zoom_level /= self.zoom_factor
+
+        # Limit zoom levels
+        self.zoom_level = max(0.1, min(self.zoom_level, 5.0))
+
+        # Update slider and label
+        self.zoom_slider.set(self.zoom_level)
+        self.zoom_label.config(text=f"{self.zoom_level:.1f}x")
+
+        self.display_result_image()
 
     def save_results(self):
         if not self.processed_image or not self.image_path:
@@ -460,19 +669,12 @@ class TumorSegmentationApp:
 
 if __name__ == "__main__":
     root = tk.Tk()
-
-    # Model path - adjust as needed
     model_path = os.path.abspath("unet_model.h5")
-    print(f"Model path: {model_path}")
 
-    # Check if model exists
     if not os.path.exists(model_path):
-        print(f"Warning: Model file not found at {model_path}")
-        # Create and save new model if needed
         new_model = TumorSegmentationModel().model
         os.makedirs(os.path.dirname(model_path), exist_ok=True)
         new_model.save(model_path)
-        print(f"New model created and saved: {model_path}")
 
     app = TumorSegmentationApp(root, model_path=model_path)
     root.mainloop()
