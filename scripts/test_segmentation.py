@@ -8,6 +8,7 @@ from PIL import Image, ImageTk
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from skimage import exposure
+from collections import deque
 
 
 # 1. Custom metric functions
@@ -173,6 +174,11 @@ class TumorSegmentationApp:
         self.contour_points = []
         self.edit_mode = False
 
+        # Edit history variables
+        self.edit_history = deque(maxlen=20)  # Stores past states
+        self.edit_future = deque(maxlen=20)  # Stores undone states
+        self.current_edit = None  # Current state
+
         self.create_widgets()
 
     def create_widgets(self):
@@ -205,6 +211,15 @@ class TumorSegmentationApp:
         self.btn_cancel_edit = ttk.Button(control_frame, text="Cancel Edit", state=tk.DISABLED,
                                           command=self.cancel_edit)
         self.btn_cancel_edit.pack(side=tk.LEFT, padx=5)
+
+        # Navigation buttons
+        self.btn_undo = ttk.Button(control_frame, text="← Back", state=tk.DISABLED,
+                                   command=self.undo_edit)
+        self.btn_undo.pack(side=tk.LEFT, padx=5)
+
+        self.btn_redo = ttk.Button(control_frame, text="Forward →", state=tk.DISABLED,
+                                   command=self.redo_edit)
+        self.btn_redo.pack(side=tk.LEFT, padx=5)
 
         self.btn_save = ttk.Button(control_frame, text="Save Results", state=tk.DISABLED,
                                    command=self.save_results)
@@ -286,6 +301,55 @@ class TumorSegmentationApp:
         self.progress = ttk.Progressbar(main_frame, mode='determinate')
         self.progress.pack(fill=tk.X, pady=5)
 
+    def save_current_state(self):
+        """Save current state to history before making changes"""
+        if self.mask is not None and self.points:
+            state = {
+                'mask': self.mask.copy(),
+                'points': [p for p in self.points]
+            }
+            self.edit_history.append(state)
+            self.current_edit = state
+            self.edit_future.clear()  # Clear redo stack when new changes are made
+            self.update_navigation_buttons()
+
+    def update_navigation_buttons(self):
+        """Update the state of navigation buttons based on history"""
+        self.btn_undo.config(state=tk.NORMAL if len(self.edit_history) > 0 else tk.DISABLED)
+        self.btn_redo.config(state=tk.NORMAL if len(self.edit_future) > 0 else tk.DISABLED)
+
+    def undo_edit(self):
+        """Revert to previous state"""
+        if len(self.edit_history) > 0:
+            # Save current state to redo stack
+            if self.current_edit:
+                self.edit_future.append(self.current_edit)
+
+            # Get previous state
+            prev_state = self.edit_history.pop()
+            self.mask = prev_state['mask'].copy()
+            self.points = [p for p in prev_state['points']]
+            self.current_edit = prev_state
+
+            self.visualize_results()
+            self.update_navigation_buttons()
+
+    def redo_edit(self):
+        """Redo an undone edit"""
+        if len(self.edit_future) > 0:
+            # Save current state to undo stack
+            if self.current_edit:
+                self.edit_history.append(self.current_edit)
+
+            # Get next state
+            next_state = self.edit_future.pop()
+            self.mask = next_state['mask'].copy()
+            self.points = [p for p in next_state['points']]
+            self.current_edit = next_state
+
+            self.visualize_results()
+            self.update_navigation_buttons()
+
     def load_model(self):
         try:
             if os.path.exists(self.model_path):
@@ -326,6 +390,15 @@ class TumorSegmentationApp:
         self.btn_edit.config(state=tk.DISABLED)
         self.btn_save_edit.config(state=tk.NORMAL)
         self.btn_cancel_edit.config(state=tk.NORMAL)
+
+        # Clear any previous history
+        self.edit_history.clear()
+        self.edit_future.clear()
+        self.current_edit = None
+
+        # Save initial state
+        self.save_current_state()
+
         self.update_info("Editing mode: Drag points to adjust the segmentation")
         self.visualize_results()
 
@@ -334,7 +407,12 @@ class TumorSegmentationApp:
         self.btn_edit.config(state=tk.NORMAL)
         self.btn_save_edit.config(state=tk.DISABLED)
         self.btn_cancel_edit.config(state=tk.DISABLED)
+        self.btn_undo.config(state=tk.DISABLED)
+        self.btn_redo.config(state=tk.DISABLED)
         self.backup_mask = None
+        self.edit_history.clear()
+        self.edit_future.clear()
+        self.current_edit = None
         self.update_info("Edits saved successfully")
 
     def cancel_edit(self):
@@ -344,6 +422,11 @@ class TumorSegmentationApp:
             self.btn_edit.config(state=tk.NORMAL)
             self.btn_save_edit.config(state=tk.DISABLED)
             self.btn_cancel_edit.config(state=tk.DISABLED)
+            self.btn_undo.config(state=tk.DISABLED)
+            self.btn_redo.config(state=tk.DISABLED)
+            self.edit_history.clear()
+            self.edit_future.clear()
+            self.current_edit = None
             self.update_info("Edits canceled")
             self.visualize_results()
 
@@ -361,6 +444,8 @@ class TumorSegmentationApp:
 
             if distance <= self.point_radius:
                 self.dragging_point = i
+                # Save state before making changes
+                self.save_current_state()
                 break
 
     def on_point_drag(self, event):
@@ -370,7 +455,16 @@ class TumorSegmentationApp:
         new_x = self.result_canvas.canvasx(event.x) / self.zoom_level
         new_y = self.result_canvas.canvasy(event.y) / self.zoom_level
 
+        # Update only the dragged point
         self.points[self.dragging_point] = (new_x, new_y)
+
+        # Update the mask based on new points
+        self.update_mask_from_points()
+
+    def update_mask_from_points(self):
+        """Update the mask based on current control points"""
+        if not self.points:
+            return
 
         temp_mask = np.zeros_like(self.mask)
         contour = np.array(self.points, dtype=np.int32).reshape((-1, 1, 2))
@@ -390,6 +484,9 @@ class TumorSegmentationApp:
         self.visualize_results()
 
     def on_point_release(self, event):
+        if self.dragging_point is not None:
+            # After dragging is complete, save the final state
+            self.save_current_state()
         self.dragging_point = None
 
     def enable_roi_selection(self):
@@ -471,6 +568,8 @@ class TumorSegmentationApp:
             self.btn_edit.config(state=tk.DISABLED)
             self.btn_save_edit.config(state=tk.DISABLED)
             self.btn_cancel_edit.config(state=tk.DISABLED)
+            self.btn_undo.config(state=tk.DISABLED)
+            self.btn_redo.config(state=tk.DISABLED)
 
         except Exception as e:
             messagebox.showerror("Error", f"Image loading error: {str(e)}")
