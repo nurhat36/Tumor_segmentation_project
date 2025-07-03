@@ -159,6 +159,10 @@ class TumorSegmentationApp:
         self.rect_end_y = None
         self.rectangle_id = None
         self.selecting_roi = False
+        self.roi_shape = "rectangle"  # Default ROI shape
+        self.roi_points = []  # For polygon ROI
+        self.roi_center = None  # For circle ROI
+        self.roi_radius = 0  # For circle ROI
 
         # Zoom and pan variables
         self.zoom_level = 1.0
@@ -173,6 +177,7 @@ class TumorSegmentationApp:
         self.point_ids = []
         self.contour_points = []
         self.edit_mode = False
+        self.drawing_polygon = False
 
         # Edit history variables
         self.edit_history = deque(maxlen=20)  # Stores past states
@@ -192,6 +197,13 @@ class TumorSegmentationApp:
         self.btn_load = ttk.Button(control_frame, text="Load Image", command=self.load_image)
         self.btn_load.pack(side=tk.LEFT, padx=5)
 
+        # ROI shape selection
+        self.roi_shape_var = tk.StringVar(value="rectangle")
+        self.roi_menu = ttk.OptionMenu(control_frame, self.roi_shape_var, "Rectangle",
+                                       "Rectangle", "Circle", "Polygon",
+                                       command=self.set_roi_shape)
+        self.roi_menu.pack(side=tk.LEFT, padx=5)
+
         self.btn_select_roi = ttk.Button(control_frame, text="Select ROI", state=tk.DISABLED,
                                          command=self.enable_roi_selection)
         self.btn_select_roi.pack(side=tk.LEFT, padx=5)
@@ -203,6 +215,10 @@ class TumorSegmentationApp:
         self.btn_edit = ttk.Button(control_frame, text="Edit", state=tk.DISABLED,
                                    command=self.start_editing)
         self.btn_edit.pack(side=tk.LEFT, padx=5)
+
+        self.btn_apply = ttk.Button(control_frame, text="Apply", state=tk.DISABLED,
+                                    command=self.apply_edits)
+        self.btn_apply.pack(side=tk.LEFT, padx=5)
 
         self.btn_save_edit = ttk.Button(control_frame, text="Save Edit", state=tk.DISABLED,
                                         command=self.save_edit)
@@ -238,6 +254,7 @@ class TumorSegmentationApp:
         self.original_canvas.bind("<ButtonPress-1>", self.start_roi_selection)
         self.original_canvas.bind("<B1-Motion>", self.update_roi_selection)
         self.original_canvas.bind("<ButtonRelease-1>", self.end_roi_selection)
+        self.original_canvas.bind("<ButtonPress-3>", self.finish_polygon)  # Right click to finish polygon
 
         # Result panel with scrollbars
         result_frame = ttk.Frame(image_frame)
@@ -300,6 +317,11 @@ class TumorSegmentationApp:
         # Progress bar
         self.progress = ttk.Progressbar(main_frame, mode='determinate')
         self.progress.pack(fill=tk.X, pady=5)
+
+    def set_roi_shape(self, shape):
+        """Set the shape for ROI selection"""
+        self.roi_shape = shape.lower()
+        self.update_info(f"ROI shape set to: {self.roi_shape.capitalize()}")
 
     def save_current_state(self):
         """Save current state to history before making changes"""
@@ -388,6 +410,7 @@ class TumorSegmentationApp:
         self.edit_mode = True
         self.backup_mask = self.mask.copy()
         self.btn_edit.config(state=tk.DISABLED)
+        self.btn_apply.config(state=tk.NORMAL)
         self.btn_save_edit.config(state=tk.NORMAL)
         self.btn_cancel_edit.config(state=tk.NORMAL)
 
@@ -402,9 +425,19 @@ class TumorSegmentationApp:
         self.update_info("Editing mode: Drag points to adjust the segmentation")
         self.visualize_results()
 
+    def apply_edits(self):
+        if not self.edit_mode or not self.points:
+            return
+
+        # Noktalara göre maskeyi güncelle
+        self.update_mask_from_points()
+        self.visualize_results()
+        self.update_info("Edits applied successfully")
+
     def save_edit(self):
         self.edit_mode = False
         self.btn_edit.config(state=tk.NORMAL)
+        self.btn_apply.config(state=tk.DISABLED)
         self.btn_save_edit.config(state=tk.DISABLED)
         self.btn_cancel_edit.config(state=tk.DISABLED)
         self.btn_undo.config(state=tk.DISABLED)
@@ -420,6 +453,7 @@ class TumorSegmentationApp:
             self.edit_mode = False
             self.mask = self.backup_mask
             self.btn_edit.config(state=tk.NORMAL)
+            self.btn_apply.config(state=tk.DISABLED)
             self.btn_save_edit.config(state=tk.DISABLED)
             self.btn_cancel_edit.config(state=tk.DISABLED)
             self.btn_undo.config(state=tk.DISABLED)
@@ -455,39 +489,32 @@ class TumorSegmentationApp:
         new_x = self.result_canvas.canvasx(event.x) / self.zoom_level
         new_y = self.result_canvas.canvasy(event.y) / self.zoom_level
 
-        # Update only the dragged point
+        # Sadece noktanın konumunu güncelle, maskeyi güncelleme
         self.points[self.dragging_point] = (new_x, new_y)
 
-        # Update the mask based on new points
-        self.update_mask_from_points()
+        # Noktaları yeniden çiz
+        self.draw_control_points()
 
     def update_mask_from_points(self):
-        """Update the mask based on current control points"""
+        """Noktalara göre maskeyi günceller"""
         if not self.points:
             return
 
+        # Yeni bir boş maske oluştur
         temp_mask = np.zeros_like(self.mask)
+
+        # Noktalardan kontur oluştur
         contour = np.array(self.points, dtype=np.int32).reshape((-1, 1, 2))
 
+        # Konturu maskeye çiz
         cv2.drawContours(temp_mask, [contour], -1, 255, -1)
 
-        x, y, w, h = cv2.boundingRect(contour)
-        expanded_rect = (
-            max(0, x - 10), max(0, y - 10),
-            min(self.mask.shape[1], x + w + 10),
-            min(self.mask.shape[0], y + h + 10)
-        )
-
-        self.mask[expanded_rect[1]:expanded_rect[3], expanded_rect[0]:expanded_rect[2]] = \
-            temp_mask[expanded_rect[1]:expanded_rect[3], expanded_rect[0]:expanded_rect[2]]
-
-        self.visualize_results()
+        # Eski maskeyi yeni maske ile değiştir
+        self.mask = temp_mask
 
     def on_point_release(self, event):
         if self.dragging_point is not None:
-            # After dragging is complete, save the final state
-            self.save_current_state()
-        self.dragging_point = None
+            self.dragging_point = None
 
     def enable_roi_selection(self):
         if not self.original_image:
@@ -495,12 +522,23 @@ class TumorSegmentationApp:
             return
 
         self.selecting_roi = True
+        self.roi_points = []
+        self.roi_center = None
+        self.roi_radius = 0
         self.btn_select_roi.config(state=tk.DISABLED)
         self.btn_process.config(state=tk.DISABLED)
-        messagebox.showinfo("Info", "Please draw a rectangle on the image to select ROI")
+
+        if self.roi_shape == "polygon":
+            self.drawing_polygon = True
+            messagebox.showinfo("Info", "Click to add polygon points. Right-click to finish.")
+        else:
+            messagebox.showinfo("Info", f"Draw a {self.roi_shape} on the image to select ROI")
 
     def start_roi_selection(self, event):
-        if self.selecting_roi:
+        if not self.selecting_roi:
+            return
+
+        if self.roi_shape == "rectangle":
             self.rect_start_x = event.x
             self.rect_start_y = event.y
             self.rect_end_x = event.x
@@ -510,9 +548,33 @@ class TumorSegmentationApp:
                 self.rect_end_x, self.rect_end_y,
                 outline='red', width=2
             )
+        elif self.roi_shape == "circle":
+            self.roi_center = (event.x, event.y)
+            self.roi_radius = 0
+            self.rectangle_id = self.original_canvas.create_oval(
+                event.x, event.y, event.x, event.y,
+                outline='red', width=2
+            )
+        elif self.roi_shape == "polygon" and self.drawing_polygon:
+            self.roi_points.append((event.x, event.y))
+            if len(self.roi_points) > 1:
+                self.original_canvas.create_line(
+                    self.roi_points[-2][0], self.roi_points[-2][1],
+                    self.roi_points[-1][0], self.roi_points[-1][1],
+                    fill='red', width=2
+                )
+            else:
+                # First point
+                self.rectangle_id = self.original_canvas.create_oval(
+                    event.x - 2, event.y - 2, event.x + 2, event.y + 2,
+                    outline='red', width=2
+                )
 
     def update_roi_selection(self, event):
-        if self.selecting_roi and self.rectangle_id:
+        if not self.selecting_roi or not self.rectangle_id:
+            return
+
+        if self.roi_shape == "rectangle":
             self.rect_end_x = event.x
             self.rect_end_y = event.y
             self.original_canvas.coords(
@@ -520,11 +582,40 @@ class TumorSegmentationApp:
                 self.rect_start_x, self.rect_start_y,
                 self.rect_end_x, self.rect_end_y
             )
+        elif self.roi_shape == "circle" and self.roi_center:
+            self.roi_radius = ((event.x - self.roi_center[0]) ** 2 + (event.y - self.roi_center[1]) ** 2) ** 0.5
+            self.original_canvas.coords(
+                self.rectangle_id,
+                self.roi_center[0] - self.roi_radius, self.roi_center[1] - self.roi_radius,
+                self.roi_center[0] + self.roi_radius, self.roi_center[1] + self.roi_radius
+            )
 
-    def end_roi_selection(self, event):
-        if self.selecting_roi:
+    def finish_polygon(self, event):
+        if self.roi_shape == "polygon" and self.drawing_polygon and len(self.roi_points) > 2:
+            self.drawing_polygon = False
             self.selecting_roi = False
             self.btn_process.config(state=tk.NORMAL)
+
+            # Close the polygon
+            self.original_canvas.create_line(
+                self.roi_points[-1][0], self.roi_points[-1][1],
+                self.roi_points[0][0], self.roi_points[0][1],
+                fill='red', width=2
+            )
+
+    def end_roi_selection(self, event):
+        if not self.selecting_roi:
+            return
+
+        if self.roi_shape == "rectangle":
+            self.selecting_roi = False
+            self.btn_process.config(state=tk.NORMAL)
+        elif self.roi_shape == "circle":
+            self.selecting_roi = False
+            self.btn_process.config(state=tk.NORMAL)
+        elif self.roi_shape == "polygon":
+            # Polygon is finished with right click, not here
+            pass
 
     def load_image(self):
         file_path = filedialog.askopenfilename(
@@ -544,6 +635,9 @@ class TumorSegmentationApp:
             self.rect_start_y = None
             self.rect_end_x = None
             self.rect_end_y = None
+            self.roi_points = []
+            self.roi_center = None
+            self.roi_radius = 0
             self.original_canvas.delete("all")
 
             # Reset zoom and pan
@@ -566,6 +660,7 @@ class TumorSegmentationApp:
             self.btn_process.config(state=tk.DISABLED)
             self.btn_save.config(state=tk.DISABLED)
             self.btn_edit.config(state=tk.DISABLED)
+            self.btn_apply.config(state=tk.DISABLED)
             self.btn_save_edit.config(state=tk.DISABLED)
             self.btn_cancel_edit.config(state=tk.DISABLED)
             self.btn_undo.config(state=tk.DISABLED)
@@ -578,10 +673,6 @@ class TumorSegmentationApp:
         if not self.image_path or not self.original_image:
             return
 
-        if not all([self.rect_start_x, self.rect_start_y, self.rect_end_x, self.rect_end_y]):
-            messagebox.showwarning("Warning", "Please select an ROI first")
-            return
-
         try:
             self.progress.start()
 
@@ -589,20 +680,62 @@ class TumorSegmentationApp:
             img_width, img_height = self.original_image.size
             original_img = np.array(self.original_image.convert('RGB'))
 
-            # Get ROI coordinates (ensure they're within image bounds)
-            x1 = max(0, min(self.rect_start_x, self.rect_end_x, img_width - 1))
-            y1 = max(0, min(self.rect_start_y, self.rect_end_y, img_height - 1))
-            x2 = min(img_width - 1, max(self.rect_start_x, self.rect_end_x, 0))
-            y2 = min(img_height - 1, max(self.rect_start_y, self.rect_end_y, 0))
+            # Create ROI mask based on selected shape
+            roi_mask = np.zeros((img_height, img_width), dtype=np.uint8)
 
-            # Extract ROI
-            roi = original_img[y1:y2, x1:x2]
+            if self.roi_shape == "rectangle":
+                if not all([self.rect_start_x, self.rect_start_y, self.rect_end_x, self.rect_end_y]):
+                    raise ValueError("Please select a valid rectangle ROI")
+
+                # Get ROI coordinates (ensure they're within image bounds)
+                x1 = max(0, min(self.rect_start_x, self.rect_end_x, img_width - 1))
+                y1 = max(0, min(self.rect_start_y, self.rect_end_y, img_height - 1))
+                x2 = min(img_width - 1, max(self.rect_start_x, self.rect_end_x, 0))
+                y2 = min(img_height - 1, max(self.rect_start_y, self.rect_end_y, 0))
+
+                # Create rectangular ROI
+                cv2.rectangle(roi_mask, (x1, y1), (x2, y2), 255, -1)
+                roi = original_img[y1:y2, x1:x2]
+
+            elif self.roi_shape == "circle":
+                if not self.roi_center or self.roi_radius <= 0:
+                    raise ValueError("Please select a valid circle ROI")
+
+                # Create circular ROI
+                cv2.circle(roi_mask, self.roi_center, int(self.roi_radius), 255, -1)
+
+                # Get bounding box
+                x1 = max(0, int(self.roi_center[0] - self.roi_radius))
+                y1 = max(0, int(self.roi_center[1] - self.roi_radius))
+                x2 = min(img_width, int(self.roi_center[0] + self.roi_radius))
+                y2 = min(img_height, int(self.roi_center[1] + self.roi_radius))
+                roi = original_img[y1:y2, x1:x2]
+
+            elif self.roi_shape == "polygon":
+                if len(self.roi_points) < 3:
+                    raise ValueError("Please select a valid polygon with at least 3 points")
+
+                # Create polygonal ROI
+                polygon_points = np.array(self.roi_points, dtype=np.int32)
+                cv2.fillPoly(roi_mask, [polygon_points], 255)
+
+                # Get bounding box
+                x_coords = [p[0] for p in self.roi_points]
+                y_coords = [p[1] for p in self.roi_points]
+                x1, x2 = max(0, min(x_coords)), min(img_width, max(x_coords))
+                y1, y2 = max(0, min(y_coords)), min(img_height, max(y_coords))
+                roi = original_img[y1:y2, x1:x2]
+
             if roi.size == 0:
                 raise ValueError("Selected ROI is too small or invalid")
 
+            # Apply ROI mask to get the region
+            roi_masked = cv2.bitwise_and(original_img, original_img, mask=roi_mask)
+            roi_masked = roi_masked[y1:y2, x1:x2]
+
             # Save ROI to temp file and process
             temp_path = "temp_roi.png"
-            Image.fromarray(roi).save(temp_path)
+            Image.fromarray(roi_masked).save(temp_path)
             img_array = ImageProcessor.load_image(temp_path)
 
             # Predict
@@ -615,7 +748,9 @@ class TumorSegmentationApp:
             # Create full-size mask
             full_mask = np.zeros((img_height, img_width), dtype=np.uint8)
             full_mask[y1:y2, x1:x2] = mask
-            self.mask = full_mask
+
+            # Apply the original ROI mask to the predicted mask
+            self.mask = cv2.bitwise_and(full_mask, roi_mask)
 
             # Visualize results
             self.visualize_results()
@@ -624,7 +759,7 @@ class TumorSegmentationApp:
             tumor_area = np.sum(self.mask > 0) / (img_width * img_height) * 100
             self.update_info(f"Segmentation complete\n"
                              f"Tumor area: {tumor_area:.2f}%\n"
-                             f"ROI Coordinates: ({x1},{y1})-({x2},{y2})")
+                             f"ROI Shape: {self.roi_shape.capitalize()}")
 
             # Update buttons
             self.btn_save.config(state=tk.NORMAL)
@@ -649,13 +784,18 @@ class TumorSegmentationApp:
         overlay = original_img.copy()
         overlay[self.mask > 0] = overlay[self.mask > 0] * 0.7 + colored_mask[self.mask > 0] * 0.3
 
-        # Draw ROI rectangle
-        if all([self.rect_start_x, self.rect_start_y, self.rect_end_x, self.rect_end_y]):
+        # Draw ROI shape
+        if self.roi_shape == "rectangle" and all(
+                [self.rect_start_x, self.rect_start_y, self.rect_end_x, self.rect_end_y]):
             x1 = min(self.rect_start_x, self.rect_end_x)
             y1 = min(self.rect_start_y, self.rect_end_y)
             x2 = max(self.rect_start_x, self.rect_end_x)
             y2 = max(self.rect_start_y, self.rect_end_y)
             cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        elif self.roi_shape == "circle" and self.roi_center and self.roi_radius > 0:
+            cv2.circle(overlay, self.roi_center, int(self.roi_radius), (0, 255, 0), 2)
+        elif self.roi_shape == "polygon" and len(self.roi_points) > 2:
+            cv2.polylines(overlay, [np.array(self.roi_points, dtype=np.int32)], True, (0, 255, 0), 2)
 
         # Find contours and create control points
         contours, _ = cv2.findContours(self.mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
