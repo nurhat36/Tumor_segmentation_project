@@ -22,6 +22,8 @@ class TumorSegmentationModel:
             p = layers.MaxPooling2D((2, 2))(x)
             return x, p
 
+
+
         # Decoder Path
         def decoder_block(x, skip, filters, dropout_rate=0.1):
             x = layers.UpSampling2D((2, 2))(x)
